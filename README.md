@@ -687,3 +687,4 @@ sudo netfilter-persistent save
 ## Keywords
 
 `aic8800d80` `aic8800` `usb-wifi-linux` `wifi6-usb-dongle` `raspberry-pi` `usb-modeswitch` `hostapd` `dnsmasq` `linux-driver` `dkms` `travel-router` `wifi-hotspot` `raspberry-pi-bookworm` `wlan0` `1111:1111` `a69c:8d81` `networkmanager` `iptables-nat` `usb-cd-rom-mode-fix` `aic8800_fdrv_usb` `radxa-pkg` `armv7l` `embedded-linux` `linux-wifi-fix` `usb-mass-storage-mode`
+
