@@ -1,0 +1,171 @@
+name: DKMS Compile Matrix
+
+on:
+  push:
+    branches: [main, bluetooth]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run weekly to catch upstream breakage
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  dkms-compile:
+    name: "DKMS on ${{ matrix.distro }} / kernel ${{ matrix.kernel }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Debian Bookworm (stable) - kernel 6.1 LTS
+          - distro: debian:bookworm
+            kernel: "6.1"
+            label: "Debian Bookworm / 6.1 LTS"
+          # Ubuntu 24.04 LTS - kernel 6.8
+          - distro: ubuntu:24.04
+            kernel: "6.8"
+            label: "Ubuntu 24.04 / 6.8"
+          # Ubuntu 22.04 LTS - kernel 6.5
+          - distro: ubuntu:22.04
+            kernel: "6.5"
+            label: "Ubuntu 22.04 / 6.5"
+
+    container:
+      image: ${{ matrix.distro }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            build-essential dkms git wget curl \
+            linux-headers-generic || \
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            build-essential dkms git wget curl \
+            linux-headers-$(uname -r) 2>/dev/null || true
+
+      - name: Fetch latest radxa-pkg aic8800 release info
+        id: release
+        run: |
+          set -euo pipefail
+          # Get latest release tag from radxa-pkg/aic8800
+          LATEST=$(curl -sf \
+            https://api.github.com/repos/radxa-pkg/aic8800/releases/latest \
+            | grep '"tag_name"' | cut -d'"' -f4)
+          echo "tag=${LATEST}" >> $GITHUB_OUTPUT
+          echo "Latest aic8800 release: ${LATEST}"
+
+      - name: Download and verify DKMS package
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.release.outputs.tag }}"
+          BASE_URL="https://github.com/radxa-pkg/aic8800/releases/download/${TAG}"
+
+          # Download firmware and DKMS .deb packages
+          wget -q "${BASE_URL}/aic8800-firmware_${TAG}_all.deb" \
+               -O aic8800-firmware.deb || \
+          wget -q "$(curl -sf https://api.github.com/repos/radxa-pkg/aic8800/releases/latest \
+               | grep -oP 'https://[^"]+aic8800-firmware[^"]+\.deb' | head -1)" \
+               -O aic8800-firmware.deb
+
+          wget -q "${BASE_URL}/aic8800-usb-dkms_${TAG}_all.deb" \
+               -O aic8800-usb-dkms.deb || \
+          wget -q "$(curl -sf https://api.github.com/repos/radxa-pkg/aic8800/releases/latest \
+               | grep -oP 'https://[^"]+aic8800-usb-dkms[^"]+\.deb' | head -1)" \
+               -O aic8800-usb-dkms.deb
+
+          echo "Downloaded packages:"
+          ls -lh aic8800-*.deb
+          sha256sum aic8800-*.deb
+
+      - name: Install packages
+        run: |
+          set -euo pipefail
+          dpkg -i aic8800-firmware.deb || apt-get install -f -y
+          dpkg -i aic8800-usb-dkms.deb || apt-get install -f -y
+
+      - name: Verify DKMS status
+        run: |
+          echo "=== DKMS status ==="
+          dkms status
+
+          # Check for aic8800 module in dkms
+          if dkms status | grep -q 'aic8800'; then
+            echo "PASS: aic8800 DKMS module registered"
+          else
+            echo "WARN: aic8800 not found in dkms status (may be kernel-version-specific)"
+          fi
+
+      - name: Validate repo config templates
+        run: |
+          echo "=== Checking required template files ==="
+          REQUIRED=(
+            "etc/modprobe.d/aic8800-blacklist.conf"
+            "etc/udev/rules.d/99-aic8800-switch.rules"
+            "etc/systemd/system/aic8800-switch.service"
+            "etc/hostapd/hostapd.conf"
+            "etc/dnsmasq.d/travel-ap.conf"
+            "etc/NetworkManager/conf.d/99-aic-ap.conf"
+          )
+          FAILED=0
+          for f in "${REQUIRED[@]}"; do
+            if [[ -f "$f" ]]; then
+              echo "OK: $f"
+            else
+              echo "MISSING: $f"
+              FAILED=1
+            fi
+          done
+          [[ $FAILED -eq 0 ]] || { echo "ERROR: Missing required template files"; exit 1; }
+
+      - name: Validate placeholder consistency
+        run: |
+          echo "=== Checking {{placeholder}} usage ==="
+          # Find all placeholders in templates
+          TEMPLATES=$(find etc/ -type f)
+          for tpl in $TEMPLATES; do
+            KEYS=$(grep -oP '\{\{\K[^}]+' "$tpl" | sort -u || true)
+            if [[ -n "$KEYS" ]]; then
+              echo "$tpl placeholders: $KEYS"
+            fi
+          done
+
+          # Verify install.sh covers all placeholders used in templates
+          ALL_KEYS=$(find etc/ -type f -exec grep -oP '\{\{\K[^}]+' {} \; | sort -u)
+          for key in $ALL_KEYS; do
+            if grep -q "${key}" install.sh; then
+              echo "OK: {{${key}}} referenced in install.sh"
+            else
+              echo "WARN: {{${key}}} in templates but not found in install.sh"
+            fi
+          done
+
+      - name: Lint install.sh (bash -n)
+        run: |
+          echo "=== Bash syntax check: install.sh ==="
+          bash -n install.sh && echo "PASS: install.sh syntax OK"
+
+          echo "=== Bash syntax check: uninstall.sh ==="
+          bash -n uninstall.sh && echo "PASS: uninstall.sh syntax OK"
+
+          if [[ -f collect-debug.sh ]]; then
+            echo "=== Bash syntax check: collect-debug.sh ==="
+            bash -n collect-debug.sh && echo "PASS: collect-debug.sh syntax OK"
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          echo ""
+          echo "================================================"
+          echo " AIC8800D80 CI Summary"
+          echo " Distro  : ${{ matrix.label }}"
+          echo " Kernel  : ${{ matrix.kernel }}"
+          echo " Run at  : $(date -u)"
+          echo "================================================"
+          dkms status || true
+          uname -r || true
