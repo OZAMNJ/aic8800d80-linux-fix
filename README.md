@@ -221,6 +221,8 @@ All four must be fixed. This guide fixes all four.
 [ISP / Hotel Router — Internet]
 ```
 
+> **Advanced users only** — The sections below are the manual steps. For the automated approach use`install.sh`. Full details: [ARCHIVE.md](ARCHIVE.md).
+
 ## Personalise Before You Start
 
 This guide uses specific IP addresses and network values that **you must adapt to your own setup**. Find and replace these values everywhere they appear before running any commands:
