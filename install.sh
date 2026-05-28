@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# AIC8800D80 Linux Fix — Fully Interactive Installer
+# AIC8800D80 Linux Fix — Fully Interactive Installer v2
 # Run as: sudo bash install.sh
 
 set -euo pipefail
@@ -19,14 +19,18 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-info(){ echo "[INFO] $*"; }
-ok(){ echo "[ OK ] $*"; }
-warn(){ echo "[WARN] $*"; }
-die(){ echo "[ERR ] $*"; exit 1; }
+info()  { echo "[INFO] $*"; }
+ok()    { echo "[ OK ] $*"; }
+warn()  { echo "[WARN] $*"; }
+die()   { echo "[ERR ] $*"; exit 1; }
 
 require_file() {
   local f="$1"
   [[ -f "$f" ]] || die "Missing required file: $f"
+}
+
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
 }
 
 prompt_default() {
@@ -46,13 +50,29 @@ list_ifaces() {
   ip -o link show | awk -F': ' '{print $2}' | grep -v '^lo$' || true
 }
 
+iface_exists() {
+  ip link show "$1" >/dev/null 2>&1
+}
+
 same_subnet_24() {
   local ip1="$1" ip2="$2"
   [[ "${ip1%.*}" == "${ip2%.*}" ]]
 }
 
 internet_ok() {
-  ping -c 1 -W 3 1.1.1.1 >/dev/null 2>&1 || curl -I --connect-timeout 5 https://github.com >/dev/null 2>&1
+  ping -c 1 -W 3 1.1.1.1 >/dev/null 2>&1 || \
+  curl -I --connect-timeout 5 https://github.com >/dev/null 2>&1
+}
+
+download_file() {
+  local url="$1" out="$2"
+  if command_exists wget; then
+    wget -O "$out" "$url"
+  elif command_exists curl; then
+    curl -L "$url" -o "$out"
+  else
+    die "Neither wget nor curl is available"
+  fi
 }
 
 append_cmdline_quirk() {
@@ -107,6 +127,7 @@ install_nat_rules() {
     mkdir -p /etc/iptables
     iptables-save > /etc/iptables/rules.v4
   }
+
   ok "NAT rules installed"
 }
 
@@ -118,13 +139,192 @@ validate_hostapd_conf() {
   ok "hostapd.conf validated"
 }
 
+install_packages() {
+  info "[1/8] Installing prerequisites"
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y \
+    dkms \
+    "linux-headers-$(uname -r)" \
+    usb-modeswitch \
+    hostapd \
+    dnsmasq \
+    wget \
+    curl \
+    ca-certificates \
+    iproute2 \
+    iptables \
+    iptables-persistent \
+    netfilter-persistent
+  ok "Prerequisites installed"
+}
+
+protect_ssh() {
+  local wan="$1"
+  info "[2/8] Installing SSH protection rule on $wan"
+  iptables -C INPUT -i "$wan" -p tcp --dport 22 -j ACCEPT 2>/dev/null || \
+    iptables -I INPUT 1 -i "$wan" -p tcp --dport 22 -j ACCEPT
+
+  iptables -C INPUT -i "$wan" -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || \
+    iptables -I INPUT 2 -i "$wan" -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+  netfilter-persistent save >/dev/null 2>&1 || true
+  ok "SSH protection installed"
+}
+
+install_driver() {
+  info "[3/8] Downloading and installing AIC8800 firmware + DKMS"
+
+  rm -f "/tmp/${FW_DEB}" "/tmp/${DKMS_DEB}"
+  download_file "${BASE_URL}/${FW_DEB}" "/tmp/${FW_DEB}"
+  download_file "${BASE_URL}/${DKMS_DEB}" "/tmp/${DKMS_DEB}"
+
+  rm -rf /lib/firmware/aic8800D80
+
+  dpkg -i "/tmp/${FW_DEB}"
+  dpkg -i "/tmp/${DKMS_DEB}" || {
+    apt-get -f install -y
+    dpkg -i "/tmp/${DKMS_DEB}"
+  }
+
+  dkms status | grep -q "aic8800-usb" || die "aic8800-usb DKMS did not install correctly"
+  ok "Firmware and DKMS installed"
+}
+
+prepare_custom_configs() {
+  info "[4/8] Preparing customized configs"
+
+  TMP_DIR="$(mktemp -d)"
+  export TMP_DIR
+  trap 'rm -rf "$TMP_DIR"' EXIT
+
+  cp -a "$SCRIPT_DIR/etc" "$TMP_DIR/"
+
+  sed -i \
+    -e "s/^interface=.*/interface=${LAN_IFACE}/" \
+    -e "s/^ssid=.*/ssid=${SSID}/" \
+    -e "s/^channel=.*/channel=${CHANNEL}/" \
+    -e "s/^wpa_passphrase=.*/wpa_passphrase=${WPA_PSK}/" \
+    -e "s/^country_code=.*/country_code=${COUNTRY_CODE}/" \
+    "$TMP_DIR/etc/hostapd/hostapd.conf"
+
+  sed -i \
+    -e "s/^interface=.*/interface=${LAN_IFACE}/" \
+    -e "s/^dhcp-range=.*/dhcp-range=${DHCP_START},${DHCP_END},${NETMASK},${LEASE_TIME}/" \
+    -e "s/^dhcp-option=3,.*/dhcp-option=3,${AP_IP}/" \
+    -e "s/^dhcp-option=6,.*/dhcp-option=6,${AP_IP}/" \
+    "$TMP_DIR/etc/dnsmasq.d/travel-ap.conf"
+
+  if [[ "$USE_UNBOUND" =~ ^([Nn][Oo]|[Nn])$ ]]; then
+    sed -i 's/^port=0/# port=0 disabled by installer/' "$TMP_DIR/etc/dnsmasq.d/travel-ap.conf" || true
+    cat >> "$TMP_DIR/etc/dnsmasq.d/travel-ap.conf" <<'EODNS'
+
+server=8.8.8.8
+server=8.8.4.4
+no-resolv
+EODNS
+  fi
+
+  cat > "$TMP_DIR/etc/NetworkManager/conf.d/99-aic-ap.conf" <<EONM
+[keyfile]
+unmanaged-devices=interface-name:${LAN_IFACE}
+EONM
+
+  sed -i \
+    -e "s|ip addr add [0-9.]\\+/[0-9]\\+ dev wlan0|ip addr add ${AP_IP}/${AP_CIDR} dev ${LAN_IFACE}|" \
+    -e "s|ip link set wlan0 up|ip link set ${LAN_IFACE} up|" \
+    -e "s|iw dev wlan0 set power_save off|iw dev ${LAN_IFACE} set power_save off|" \
+    "$TMP_DIR/etc/systemd/system/aic8800-switch.service"
+
+  ok "Configs customized"
+}
+
+copy_to_system() {
+  info "[5/8] Installing config files to system"
+
+  mkdir -p /etc/modprobe.d
+  cp "$TMP_DIR/etc/modprobe.d/aic8800-blacklist.conf" /etc/modprobe.d/
+
+  mkdir -p /etc/udev/rules.d
+  cp "$TMP_DIR/etc/udev/rules.d/99-aic8800-switch.rules" /etc/udev/rules.d/
+
+  mkdir -p /etc/systemd/system
+  cp "$TMP_DIR/etc/systemd/system/aic8800-switch.service" /etc/systemd/system/
+
+  mkdir -p /etc/systemd/system/hostapd.service.d
+  cp "$TMP_DIR/etc/systemd/system/hostapd.service.d/wait-for-switch.conf" \
+     /etc/systemd/system/hostapd.service.d/
+
+  mkdir -p /etc/systemd/system/dnsmasq.service.d
+  cp "$TMP_DIR/etc/systemd/system/dnsmasq.service.d/wait-for-switch.conf" \
+     /etc/systemd/system/dnsmasq.service.d/
+
+  mkdir -p /etc/hostapd
+  cp "$TMP_DIR/etc/hostapd/hostapd.conf" /etc/hostapd/
+
+  cp "$TMP_DIR/etc/default/hostapd" /etc/default/hostapd
+
+  mkdir -p /etc/dnsmasq.d
+  cp "$TMP_DIR/etc/dnsmasq.d/travel-ap.conf" /etc/dnsmasq.d/
+
+  mkdir -p /etc/NetworkManager/conf.d
+  cp "$TMP_DIR/etc/NetworkManager/conf.d/99-aic-ap.conf" /etc/NetworkManager/conf.d/
+
+  ok "Config files installed"
+}
+
+configure_system() {
+  info "[6/8] Validating + configuring system"
+  validate_hostapd_conf /etc/hostapd/hostapd.conf
+  append_cmdline_quirk
+  enable_ip_forwarding
+  install_nat_rules "$WAN_IFACE" "$LAN_IFACE"
+  ok "System configuration complete"
+}
+
+enable_services() {
+  info "[7/8] Enabling services"
+  systemctl daemon-reload
+  udevadm control --reload-rules
+  update-initramfs -u 2>/dev/null || true
+  systemctl restart NetworkManager 2>/dev/null || true
+  systemctl unmask hostapd 2>/dev/null || true
+  systemctl enable aic8800-switch hostapd dnsmasq
+  ok "Services enabled"
+}
+
+post_install_summary() {
+  info "[8/8] Final summary"
+  echo
+  echo "============================================================"
+  echo " Installation complete!"
+  echo "============================================================"
+  echo "  WAN interface  : $WAN_IFACE"
+  echo "  LAN/AP iface   : $LAN_IFACE"
+  echo "  AP gateway     : $AP_IP/$AP_CIDR"
+  echo "  DHCP range     : $DHCP_START - $DHCP_END"
+  echo "  SSID           : $SSID"
+  echo "  Country / Ch   : $COUNTRY_CODE / $CHANNEL"
+  echo
+  echo "Next: reboot the system"
+  echo "  sudo reboot"
+  echo
+  echo "After reboot, verify:"
+  echo "  1. lsusb | grep a69c                  (expect a69c:8d81)"
+  echo "  2. ip addr show $LAN_IFACE            (expect $AP_IP)"
+  echo "  3. systemctl status aic8800-switch hostapd dnsmasq --no-pager"
+  echo "  4. dkms status                        (expect aic8800-usb installed)"
+  echo "  5. ping -c3 8.8.8.8                   (from a client connected via WiFi)"
+  echo "============================================================"
+}
+
 echo "============================================================"
-echo " AIC8800D80 Fully Interactive Installer"
+echo " AIC8800D80 Fully Interactive Installer v2"
 echo "============================================================"
 echo "IMPORTANT:"
 echo "  - Connect your Raspberry Pi to wired LAN/Ethernet first"
-echo "  - Active internet is required to install packages and download"
-echo "    the AIC8800 firmware/DKMS files from GitHub"
+echo "  - Active internet is required to install packages and"
+echo "    download the AIC8800 firmware/DKMS files from GitHub"
 echo
 
 internet_ok || die "No active internet connection detected. Connect LAN/Ethernet and retry."
@@ -134,7 +334,11 @@ list_ifaces | sed 's/^/  - /'
 echo
 
 WAN_IFACE="$(prompt_default "WAN/uplink interface (must have internet)" "eth0")"
+iface_exists "$WAN_IFACE" || die "WAN interface '$WAN_IFACE' does not exist"
+
 LAN_IFACE="$(prompt_default "LAN/AP WiFi interface" "wlan0")"
+iface_exists "$LAN_IFACE" || warn "LAN/AP interface '$LAN_IFACE' is not visible yet; continuing"
+
 AP_IP="$(prompt_default "AP gateway IP" "192.168.73.1")"
 AP_CIDR="$(prompt_default "AP subnet CIDR bits" "24")"
 DHCP_START="$(prompt_default "DHCP start IP" "192.168.73.10")"
@@ -166,6 +370,7 @@ echo "Channel       : $CHANNEL"
 echo "Use Unbound   : $USE_UNBOUND"
 echo "Protect SSH   : $PROTECT_SSH"
 echo "------------------------------------------------------------"
+
 read -r -p "Continue with these settings? (yes/no) [yes]: " CONFIRM
 CONFIRM="${CONFIRM:-yes}"
 [[ "$CONFIRM" =~ ^([Yy][Ee][Ss]|[Yy])$ ]] || die "Aborted"
@@ -180,124 +385,17 @@ require_file "$SCRIPT_DIR/etc/default/hostapd"
 require_file "$SCRIPT_DIR/etc/dnsmasq.d/travel-ap.conf"
 require_file "$SCRIPT_DIR/etc/NetworkManager/conf.d/99-aic-ap.conf"
 
-info "[1/7] Installing prerequisites"
-export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y dkms "linux-headers-$(uname -r)" usb-modeswitch hostapd dnsmasq wget curl
-ok "Prerequisites installed"
+install_packages
 
 if [[ "$PROTECT_SSH" =~ ^([Yy][Ee][Ss]|[Yy])$ ]]; then
-  info "[2/7] Installing SSH protection rule on $WAN_IFACE"
-  apt-get install -y iptables-persistent netfilter-persistent >/dev/null 2>&1 || true
-  iptables -C INPUT -i "$WAN_IFACE" -p tcp --dport 22 -j ACCEPT 2>/dev/null || \
-    iptables -I INPUT 1 -i "$WAN_IFACE" -p tcp --dport 22 -j ACCEPT
-  iptables -C INPUT -i "$WAN_IFACE" -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || \
-    iptables -I INPUT 2 -i "$WAN_IFACE" -m state --state ESTABLISHED,RELATED -j ACCEPT
-  netfilter-persistent save >/dev/null 2>&1 || true
-  ok "SSH protection installed"
+  protect_ssh "$WAN_IFACE"
 else
-  info "[2/7] Skipping SSH protection rule"
+  info "[2/8] Skipping SSH protection rule"
 fi
 
-info "[3/7] Downloading and installing AIC8800 firmware + DKMS"
-wget -O "/tmp/${FW_DEB}" "${BASE_URL}/${FW_DEB}"
-wget -O "/tmp/${DKMS_DEB}" "${BASE_URL}/${DKMS_DEB}"
-rm -rf /lib/firmware/aic8800D80
-dpkg -i "/tmp/${FW_DEB}"
-dpkg -i "/tmp/${DKMS_DEB}"
-dkms status | grep -q "aic8800-usb" || die "aic8800-usb DKMS did not install correctly"
-ok "Firmware and DKMS installed"
-
-info "[4/7] Preparing customized configs"
-TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "$TMP_DIR"' EXIT
-cp -a "$SCRIPT_DIR/etc" "$TMP_DIR/"
-
-sed -i \
-  -e "s/^interface=.*/interface=${LAN_IFACE}/" \
-  -e "s/^ssid=.*/ssid=${SSID}/" \
-  -e "s/^channel=.*/channel=${CHANNEL}/" \
-  -e "s/^wpa_passphrase=.*/wpa_passphrase=${WPA_PSK}/" \
-  -e "s/^country_code=.*/country_code=${COUNTRY_CODE}/" \
-  "$TMP_DIR/etc/hostapd/hostapd.conf"
-
-sed -i \
-  -e "s/^interface=.*/interface=${LAN_IFACE}/" \
-  -e "s/^dhcp-range=.*/dhcp-range=${DHCP_START},${DHCP_END},${NETMASK},${LEASE_TIME}/" \
-  -e "s/^dhcp-option=3,.*/dhcp-option=3,${AP_IP}/" \
-  -e "s/^dhcp-option=6,.*/dhcp-option=6,${AP_IP}/" \
-  "$TMP_DIR/etc/dnsmasq.d/travel-ap.conf"
-
-if [[ "$USE_UNBOUND" =~ ^([Nn][Oo]|[Nn])$ ]]; then
-  sed -i 's/^port=0/# port=0 disabled by installer/' "$TMP_DIR/etc/dnsmasq.d/travel-ap.conf" || true
-  cat >> "$TMP_DIR/etc/dnsmasq.d/travel-ap.conf" <<'EODNS'
-
-server=8.8.8.8
-server=8.8.4.4
-no-resolv
-EODNS
-fi
-
-cat > "$TMP_DIR/etc/NetworkManager/conf.d/99-aic-ap.conf" <<EONM
-[keyfile]
-unmanaged-devices=interface-name:${LAN_IFACE}
-EONM
-
-sed -i \
-  -e "s|ip addr add [0-9.]\\+/[0-9]\\+ dev wlan0|ip addr add ${AP_IP}/${AP_CIDR} dev ${LAN_IFACE}|" \
-  -e "s|ip link set wlan0 up|ip link set ${LAN_IFACE} up|" \
-  -e "s|iw dev wlan0 set power_save off|iw dev ${LAN_IFACE} set power_save off|" \
-  "$TMP_DIR/etc/systemd/system/aic8800-switch.service"
-ok "Configs customized"
-
-info "[5/7] Installing config files to system"
-mkdir -p /etc/modprobe.d && cp "$TMP_DIR/etc/modprobe.d/aic8800-blacklist.conf" /etc/modprobe.d/
-mkdir -p /etc/udev/rules.d && cp "$TMP_DIR/etc/udev/rules.d/99-aic8800-switch.rules" /etc/udev/rules.d/
-mkdir -p /etc/systemd/system && cp "$TMP_DIR/etc/systemd/system/aic8800-switch.service" /etc/systemd/system/
-mkdir -p /etc/systemd/system/hostapd.service.d
-cp "$TMP_DIR/etc/systemd/system/hostapd.service.d/wait-for-switch.conf" /etc/systemd/system/hostapd.service.d/
-mkdir -p /etc/systemd/system/dnsmasq.service.d
-cp "$TMP_DIR/etc/systemd/system/dnsmasq.service.d/wait-for-switch.conf" /etc/systemd/system/dnsmasq.service.d/
-mkdir -p /etc/hostapd && cp "$TMP_DIR/etc/hostapd/hostapd.conf" /etc/hostapd/
-cp "$TMP_DIR/etc/default/hostapd" /etc/default/hostapd
-mkdir -p /etc/dnsmasq.d && cp "$TMP_DIR/etc/dnsmasq.d/travel-ap.conf" /etc/dnsmasq.d/
-mkdir -p /etc/NetworkManager/conf.d && cp "$TMP_DIR/etc/NetworkManager/conf.d/99-aic-ap.conf" /etc/NetworkManager/conf.d/
-ok "Config files installed"
-
-info "[6/7] Validating + configuring system"
-validate_hostapd_conf /etc/hostapd/hostapd.conf
-append_cmdline_quirk
-enable_ip_forwarding
-install_nat_rules "$WAN_IFACE" "$LAN_IFACE"
-ok "System configuration complete"
-
-info "[7/7] Enabling services"
-systemctl daemon-reload
-udevadm control --reload-rules
-update-initramfs -u 2>/dev/null || true
-systemctl restart NetworkManager 2>/dev/null || true
-systemctl unmask hostapd 2>/dev/null || true
-systemctl enable aic8800-switch hostapd dnsmasq
-ok "Services enabled"
-
-echo
-echo "============================================================"
-echo " Installation complete!"
-echo "============================================================"
-echo "  WAN interface  : $WAN_IFACE"
-echo "  LAN/AP iface   : $LAN_IFACE"
-echo "  AP gateway     : $AP_IP/$AP_CIDR"
-echo "  DHCP range     : $DHCP_START - $DHCP_END"
-echo "  SSID           : $SSID"
-echo "  Country / Ch   : $COUNTRY_CODE / $CHANNEL"
-echo
-echo "Next: reboot the system"
-echo "  sudo reboot"
-echo
-echo "After reboot, verify:"
-echo "  1. lsusb | grep a69c                  (expect a69c:8d81)"
-echo "  2. ip addr show $LAN_IFACE             (expect $AP_IP)"
-echo "  3. systemctl status aic8800-switch hostapd dnsmasq --no-pager"
-echo "  4. dkms status                         (expect aic8800-usb installed)"
-echo "  5. ping -c3 8.8.8.8                    (from a client connected via WiFi)"
-echo "============================================================"
+install_driver
+prepare_custom_configs
+copy_to_system
+configure_system
+enable_services
+post_install_summary
