@@ -3,9 +3,56 @@
 > **Verified working on Raspberry Pi OS Bookworm (Kernel 6.12.75+)**  
 > Solves the CD-ROM mode problem permanently and builds a fully automatic WiFi Access Point with internet sharing.
 
+![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Raspberry%20Pi-blue)
+![Kernel](https://img.shields.io/badge/kernel-6.12%2B-green)
+![Chipset](https://img.shields.io/badge/chipset-AIC8800D80-orange)
+![License](https://img.shields.io/badge/license-MIT-lightgrey)
+
+---
+
+<!-- SEO KEYWORDS
+aic8800d80 linux driver
+aic8800d80 raspberry pi
+aic8800 usb wifi dongle linux fix
+usb wifi adapter shows as cd-rom linux
+usb modeswitch aic8800
+1111:1111 usb id linux
+a69c:8d81 linux driver
+wifi 6 usb dongle linux not working
+aic8800_fdrv_usb dkms
+radxa-pkg aic8800
+hostapd dnsmasq raspberry pi access point
+usb-storage quirks 1111:1111
+wlan0 not showing after modeswitch
+raspberry pi wifi hotspot bookworm
+linux travel router raspberry pi
+usb wifi dongle cd-rom mode fix
+usb mass storage mode wifi adapter
+usb_modeswitch systemd service
+networkmanager unmanaged-devices wlan0
+iptables nat masquerade linux wifi sharing
+aic8800 dkms install bookworm
+Raspbian Bookworm WiFi AP setup
+linux wifi dongle not detected fix
+usb wifi adapter keeps disconnecting linux
+Bootworm dhcpcd replacement networkmanager
+-->
+
 ## Who This Guide Is For
 
 Any Linux user with a cheap USB WiFi 6 dongle that refuses to work — showing up as a virtual CD-ROM instead of a WiFi adapter. This is an extremely common problem with AIC8800D80-based dongles sold under dozens of generic brand names on Amazon, AliExpress, and eBay.
+
+**Common search terms that lead here:**
+- USB WiFi adapter shows as CD-ROM drive in Linux
+- `lsusb` shows `1111:1111` — WiFi dongle not working
+- AIC8800 / AIC8800D80 driver not loading on Raspberry Pi
+- `wlan0` not created after USB modeswitch
+- hostapd fails with "unknown interface wlan0" at boot
+- WiFi 6 USB dongle Linux driver DKMS install
+- Cheap WiFi dongle stuck in Mass Storage mode Linux
+- `a69c:8d80` stuck — never reaches `a69c:8d81`
+- `aic8800_fdrv` vs `aic8800_fdrv_usb` — which module to use
+- Raspberry Pi travel router Bookworm 2024/2025
 
 ## Affected Devices
 
@@ -491,3 +538,9 @@ sudo dpkg-reconfigure aic8800-usb-dkms
 - [radxa-pkg/aic8800](https://github.com/radxa-pkg/aic8800) — DKMS driver packages (use these, not shenmintao)
 - [radxa-pkg/aic8800 issue #68](https://github.com/radxa-pkg/aic8800/issues/68) — modeswitch payload discovery
 - [linux.brostrend.com/advanced/usb_modeswitch](https://linux.brostrend.com/advanced/usb_modeswitch/) — AIC modeswitch reference
+
+---
+
+## Keywords
+
+`aic8800d80` `aic8800` `usb-wifi-linux` `wifi6-usb-dongle` `raspberry-pi` `usb-modeswitch` `hostapd` `dnsmasq` `linux-driver` `dkms` `travel-router` `wifi-hotspot` `raspberry-pi-bookworm` `wlan0` `1111:1111` `a69c:8d81` `networkmanager` `iptables-nat` `usb-cd-rom-mode-fix` `aic8800_fdrv_usb` `radxa-pkg` `armv7l` `embedded-linux` `linux-wifi-fix` `usb-mass-storage-mode`
