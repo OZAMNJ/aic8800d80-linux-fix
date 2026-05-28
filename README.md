@@ -267,14 +267,20 @@ sudo systemctl restart NetworkManager
 Use the **radxa-pkg** pre-built `.deb` packages only. Do **not** use the `shenmintao/install.sh` script.
 
 ```bash
+# The automated installer handles this for you — including dynamic version detection.
+# Run: sudo bash install.sh
+#
+# For manual install, replace VERSION below with output of:
+#   curl -s https://api.github.com/repos/radxa-pkg/aic8800/releases/latest | grep tag_name
+VERSION="$(curl -s https://api.github.com/repos/radxa-pkg/aic8800/releases/latest | grep -oP '(?<="tag_name": ")[^"]+' | head -1)"
 sudo apt install -y dkms linux-headers-$(uname -r)
-wget https://github.com/radxa-pkg/aic8800/releases/download/4.0%2Bgit20250410.b99ca8b6-3/aic8800-firmware_4.0+git20250410.b99ca8b6-3_all.deb
-wget https://github.com/radxa-pkg/aic8800/releases/download/4.0%2Bgit20250410.b99ca8b6-3/aic8800-usb-dkms_4.0+git20250410.b99ca8b6-3_all.deb
+wget "https://github.com/radxa-pkg/aic8800/releases/download/${VERSION}/aic8800-firmware_${VERSION}_all.deb"
+wget "https://github.com/radxa-pkg/aic8800/releases/download/${VERSION}/aic8800-usb-dkms_${VERSION}_all.deb"
 
 # Remove any stale firmware from previous attempts
 sudo rm -rf /lib/firmware/aic8800D80
-sudo dpkg -i aic8800-firmware_4.0+git20250410.b99ca8b6-3_all.deb
-sudo dpkg -i aic8800-usb-dkms_4.0+git20250410.b99ca8b6-3_all.deb
+sudo dpkg -i "aic8800-firmware_${VERSION}_all.deb"
+sudo dpkg -i "aic8800-usb-dkms_${VERSION}_all.deb"
 ```
 
 Verify the DKMS build succeeded:
