@@ -35,11 +35,6 @@ cd aic8800d80-linux-fix
 sudo bash install.sh
 ```
 
-> **Tip:** Preview what the installer will do without making any changes:
-> ```bash
-> sudo bash install.sh --dry-run
-> ```
-
 ### The installer will ask you for
 - WAN/uplink interface, usually `eth0`
 - LAN/AP WiFi interface, usually `wlan0`
@@ -73,6 +68,7 @@ lsusb | grep a69c
 ip addr show wlan0
 sudo systemctl status aic8800-switch hostapd dnsmasq --no-pager
 dkms status
+```
 ```
 ```
 
