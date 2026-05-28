@@ -14,6 +14,9 @@ jobs:
   dkms-compile:
     name: "DKMS on ${{ matrix.distro }} / kernel ${{ matrix.kernel }}"
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash   # force bash for all steps — sh doesn't support pipefail
     strategy:
       fail-fast: false
       matrix:
@@ -40,60 +43,60 @@ jobs:
 
       - name: Install build dependencies
         run: |
+          set -euo pipefail
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            build-essential dkms git wget curl \
+            build-essential dkms git wget curl ca-certificates \
             linux-headers-generic || \
           DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            build-essential dkms git wget curl \
+            build-essential dkms git wget curl ca-certificates \
             linux-headers-$(uname -r) 2>/dev/null || true
 
       - name: Fetch latest radxa-pkg aic8800 release info
         id: release
         run: |
           set -euo pipefail
-          # Get latest release tag from radxa-pkg/aic8800
           LATEST=$(curl -sf \
             https://api.github.com/repos/radxa-pkg/aic8800/releases/latest \
             | grep '"tag_name"' | cut -d'"' -f4)
-          echo "tag=${LATEST}" >> $GITHUB_OUTPUT
+          if [[ -z "$LATEST" ]]; then
+            echo "ERROR: Could not resolve latest aic8800 release tag" >&2
+            exit 1
+          fi
+          echo "tag=${LATEST}" >> "$GITHUB_OUTPUT"
           echo "Latest aic8800 release: ${LATEST}"
 
-      - name: Download and verify DKMS package
+      - name: Download and verify DKMS packages
         run: |
           set -euo pipefail
           TAG="${{ steps.release.outputs.tag }}"
-          BASE_URL="https://github.com/radxa-pkg/aic8800/releases/download/${TAG}"
+          ENCODED_TAG="${TAG/+/%2B}"
+          BASE_URL="https://github.com/radxa-pkg/aic8800/releases/download/${ENCODED_TAG}"
 
-          # Download firmware and DKMS .deb packages
-          wget -q "${BASE_URL}/aic8800-firmware_${TAG}_all.deb" \
-               -O aic8800-firmware.deb || \
-          wget -q "$(curl -sf https://api.github.com/repos/radxa-pkg/aic8800/releases/latest \
-               | grep -oP 'https://[^"]+aic8800-firmware[^"]+\.deb' | head -1)" \
-               -O aic8800-firmware.deb
+          echo "Downloading aic8800-firmware_${TAG}_all.deb ..."
+          wget -q "${BASE_URL}/aic8800-firmware_${TAG}_all.deb" -O aic8800-firmware.deb
 
-          wget -q "${BASE_URL}/aic8800-usb-dkms_${TAG}_all.deb" \
-               -O aic8800-usb-dkms.deb || \
-          wget -q "$(curl -sf https://api.github.com/repos/radxa-pkg/aic8800/releases/latest \
-               | grep -oP 'https://[^"]+aic8800-usb-dkms[^"]+\.deb' | head -1)" \
-               -O aic8800-usb-dkms.deb
+          echo "Downloading aic8800-usb-dkms_${TAG}_all.deb ..."
+          wget -q "${BASE_URL}/aic8800-usb-dkms_${TAG}_all.deb" -O aic8800-usb-dkms.deb
 
           echo "Downloaded packages:"
           ls -lh aic8800-*.deb
           sha256sum aic8800-*.deb
 
+          echo "Verifying packages with dpkg --info ..."
+          dpkg --info aic8800-firmware.deb   | grep -E "Package|Version"
+          dpkg --info aic8800-usb-dkms.deb   | grep -E "Package|Version"
+
       - name: Install packages
         run: |
           set -euo pipefail
-          dpkg -i aic8800-firmware.deb || apt-get install -f -y
-          dpkg -i aic8800-usb-dkms.deb || apt-get install -f -y
+          dpkg -i aic8800-firmware.deb  || apt-get install -f -y
+          dpkg -i aic8800-usb-dkms.deb  || apt-get install -f -y
 
       - name: Verify DKMS status
         run: |
           echo "=== DKMS status ==="
           dkms status
-
-          # Check for aic8800 module in dkms
           if dkms status | grep -q 'aic8800'; then
             echo "PASS: aic8800 DKMS module registered"
           else
@@ -124,8 +127,7 @@ jobs:
 
       - name: Validate placeholder consistency
         run: |
-          echo "=== Checking {{placeholder}} usage ==="
-          # Find all placeholders in templates
+          echo "=== Checking placeholder usage in templates ==="
           TEMPLATES=$(find etc/ -type f)
           for tpl in $TEMPLATES; do
             KEYS=$(grep -oP '\{\{\K[^}]+' "$tpl" | sort -u || true)
@@ -133,9 +135,7 @@ jobs:
               echo "$tpl placeholders: $KEYS"
             fi
           done
-
-          # Verify install.sh covers all placeholders used in templates
-          ALL_KEYS=$(find etc/ -type f -exec grep -oP '\{\{\K[^}]+' {} \; | sort -u)
+          ALL_KEYS=$(find etc/ -type f -exec grep -oP '\{\{\K[^}]+' {} \; | sort -u || true)
           for key in $ALL_KEYS; do
             if grep -q "${key}" install.sh; then
               echo "OK: {{${key}}} referenced in install.sh"
@@ -144,14 +144,12 @@ jobs:
             fi
           done
 
-      - name: Lint install.sh (bash -n)
+      - name: Lint shell scripts (bash -n)
         run: |
           echo "=== Bash syntax check: install.sh ==="
           bash -n install.sh && echo "PASS: install.sh syntax OK"
-
           echo "=== Bash syntax check: uninstall.sh ==="
           bash -n uninstall.sh && echo "PASS: uninstall.sh syntax OK"
-
           if [[ -f collect-debug.sh ]]; then
             echo "=== Bash syntax check: collect-debug.sh ==="
             bash -n collect-debug.sh && echo "PASS: collect-debug.sh syntax OK"
@@ -160,7 +158,6 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          echo ""
           echo "================================================"
           echo " AIC8800D80 CI Summary"
           echo " Distro  : ${{ matrix.label }}"
@@ -168,4 +165,4 @@ jobs:
           echo " Run at  : $(date -u)"
           echo "================================================"
           dkms status || true
-          uname -r || true
+          uname -r    || true
