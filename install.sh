@@ -44,7 +44,7 @@ RADXA_REPO="https://github.com/radxa-pkg/aic8800"
 QUIRK="usb-storage.quirks=1111:1111:i"
 CMDLINE_FILE="/boot/firmware/cmdline.txt"
 BACKUP_DIR="/var/backups/aic8800d80-install-$(date +%Y%m%d%H%M%S)"
-VERSION="3.2.0"
+VERSION="3.2.1"
 
 # ─────────────────────────────────────────────────────────────────────
 # Root check (skip in dry-run)
@@ -208,18 +208,27 @@ resolve_aic_version() {
   fi
 
   if [[ -n "$latest_json" ]]; then
-    latest_tag="$(echo "$latest_json" | grep '"tag_name"' | head -n1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"
-    if [[ -n "$latest_tag" ]]; then
-      AIC_VER="$latest_tag"
-      local encoded_tag
-      encoded_tag="$(echo "$latest_tag" | sed 's/+/%2B/g')"
-      BASE_URL="${RADXA_REPO}/releases/download/${encoded_tag}"
-      ok "Resolved latest AIC8800 version: $AIC_VER"
-      return 0
+    # Check for API rate limit
+    if echo "$latest_json" | grep -q '"rate limit"\|"API rate limit"\|"403"'; then
+      warn "GitHub API rate limit hit — falling back to pinned version"
+    else
+      latest_tag="$(echo "$latest_json" | grep '"tag_name"' | head -n1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"
+      if [[ -n "$latest_tag" ]]; then
+        AIC_VER="$latest_tag"
+        local encoded_tag
+        encoded_tag="$(echo "$latest_tag" | sed 's/+/%2B/g')"
+        BASE_URL="${RADXA_REPO}/releases/download/${encoded_tag}"
+        ok "Resolved latest AIC8800 version: $AIC_VER"
+        return 0
+      else
+        warn "GitHub API returned JSON but no tag_name found — response: $(echo "$latest_json" | head -c 120)"
+      fi
     fi
+  else
+    warn "GitHub API request failed (no response) — check internet connectivity"
   fi
 
-  warn "Could not resolve latest version from GitHub API. Falling back to pinned version."
+  warn "Falling back to pinned version: 4.0+git20250410.b99ca8b6-3"
   AIC_VER="4.0+git20250410.b99ca8b6-3"
   BASE_URL="${RADXA_REPO}/releases/download/4.0%2Bgit20250410.b99ca8b6-3"
 }
@@ -399,6 +408,26 @@ fi
 step "Resolving AIC8800 package version"
 resolve_aic_version
 FW_DEB="aic8800-firmware_${AIC_VER}_all.deb"
+
+# Check if this version is already installed
+if [[ "$DRY_RUN" == false ]]; then
+  INSTALLED_VER="$(dpkg-query -W -f='${Version}' aic8800-usb-dkms 2>/dev/null || true)"
+  if [[ -n "$INSTALLED_VER" ]]; then
+    if [[ "$INSTALLED_VER" == "$AIC_VER" ]]; then
+      ok "aic8800-usb-dkms $AIC_VER is already installed"
+      if [[ "$NON_INTERACTIVE" == false ]]; then
+        read -r -p "  Re-install anyway? (yes/no) [no]: " reinstall
+        [[ "${reinstall:-no}" =~ ^([Yy][Ee][Ss]|[Yy])$ ]] || {
+          info "Skipping driver download/install (already up to date)"
+          SKIP_DRIVER=true
+        }
+      fi
+    else
+      info "Upgrading aic8800-usb-dkms: $INSTALLED_VER → $AIC_VER"
+    fi
+  fi
+fi
+SKIP_DRIVER="${SKIP_DRIVER:-false}"
 DKMS_DEB="aic8800-usb-dkms_${AIC_VER}_all.deb"
 
 # ─────────────────────────────────────────────────────────────────────
@@ -626,6 +655,9 @@ fi
 # STEP 3: Download + verify + install AIC8800 driver
 # ─────────────────────────────────────────────────────────────────────
 step "[3/8] Downloading and installing AIC8800 firmware + DKMS"
+if [[ "$SKIP_DRIVER" == true ]]; then
+  ok "Skipping — aic8800-usb-dkms $AIC_VER already installed"
+else
 rm -f "/tmp/${FW_DEB}" "/tmp/${DKMS_DEB}"
 download_file "${BASE_URL}/${FW_DEB}" "/tmp/${FW_DEB}"
 download_file "${BASE_URL}/${DKMS_DEB}" "/tmp/${DKMS_DEB}"
@@ -647,6 +679,7 @@ if [[ "$DRY_RUN" == false ]]; then
 else
   dryrun "dpkg -i $FW_DEB && dpkg -i $DKMS_DEB"
 fi
+fi # end SKIP_DRIVER check
 
 # ─────────────────────────────────────────────────────────────────────
 # STEP 4: Prepare customized config files via {{PLACEHOLDER}} replacement
