@@ -10,6 +10,54 @@
 
 ---
 
+## ⚡ Quick Start — Interactive Installer
+
+> **The fastest way to get running.** Clone this repo, run the installer, answer the prompts — done.
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/OZAMNJ/aic8800d80-linux-fix.git
+cd aic8800d80-linux-fix
+
+# 2. Run the interactive installer (as root)
+sudo bash install.sh
+```
+
+The installer will **detect your network interfaces** and walk you through:
+
+| Prompt | Example | Description |
+|--------|---------|-------------|
+| WAN / uplink interface | `eth0` | The interface connected to the internet |
+| LAN / AP WiFi interface | `wlan0` | The AIC8800D80 dongle interface |
+| AP gateway IP | `192.168.73.1` | IP of this device on the hotspot side |
+| AP subnet CIDR | `24` | Subnet size (24 = 255.255.255.0) |
+| DHCP pool start | `192.168.73.10` | First IP handed to clients |
+| DHCP pool end | `192.168.73.100` | Last IP handed to clients |
+| DHCP netmask | `255.255.255.0` | Subnet mask for DHCP |
+| DHCP lease time | `24h` | How long leases last |
+| WiFi SSID | `TravelRouter` | Name of your hotspot |
+| WiFi password | *(hidden input)* | WPA2 passphrase |
+| Country code | `DE` | ISO 3166-1 alpha-2, e.g. `DE` `US` `GB` |
+| WiFi channel | `6` | 1, 6, or 11 recommended for 2.4 GHz |
+| Use Unbound DNS | `yes` | `yes` = port 53 local resolver, `no` = 8.8.8.8 fallback |
+
+After confirming, the installer:
+1. Patches all config files with your chosen values (in a temp dir — originals untouched)
+2. Copies everything to the correct system paths
+3. Reloads systemd + udev
+4. Enables `aic8800-switch`, `hostapd`, and `dnsmasq` services
+5. Prints ready-to-run **NAT / iptables rules** for your specific WAN interface
+6. Shows a **7-step verification checklist**
+
+> ⚠️ **Before rebooting**, also complete:
+> - Step 3 (install DKMS driver packages below)
+> - Add `usb-storage.quirks=1111:1111:i` to `/boot/firmware/cmdline.txt`
+> - Apply the NAT rules printed by the installer
+
+---
+
+---
+
 <!-- SEO KEYWORDS
 aic8800d80 linux driver
 aic8800d80 raspberry pi
