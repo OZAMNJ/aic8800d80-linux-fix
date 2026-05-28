@@ -1,27 +1,45 @@
 [Unit]
-Description=AIC8800D80 USB Modeswitch
+Description=AIC8800D80 USB Modeswitch + Driver Loader
 After=systemd-udevd.service
+Requires=systemd-udevd.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-# Send single-message modeswitch — device disconnects and re-enumerates
+
+# Stage 1: Modeswitch from 1111:1111 (CD-ROM) to a69c:8d80 (firmware loader)
+# Device disconnects and re-enumerates after this
 ExecStart=/usr/sbin/usb_modeswitch \
   -v 0x1111 -p 0x1111 \
   -M "555342438765432100000000000010fd0000000000000000000000000000f2"
-# Wait for firmware stage 1->2->3 re-enumeration
+
+# Wait for re-enumeration (stage 1->2)
 ExecStartPost=/bin/sleep 10
-# Load firmware downloader (triggers a69c:8d80 -> a69c:8d81 transition)
+
+# Stage 2: Load firmware downloader (triggers a69c:8d80 -> a69c:8d81 transition)
 ExecStartPost=/sbin/modprobe aic_load_fw_usb
+
+# Wait for firmware upload (stage 2->3)
 ExecStartPost=/bin/sleep 5
-# Load main WiFi driver (creates wlan0)
+
+# Stage 3: Load main WiFi driver (creates {{LAN_IFACE}})
 ExecStartPost=/sbin/modprobe aic8800_fdrv_usb
-ExecStartPost=/bin/sleep 3
-# Assign static IP and bring interface up
-# CHANGE 192.168.73.1/24 to your chosen AP gateway/subnet
-ExecStartPost=-/sbin/ip addr add 192.168.73.1/24 dev wlan0
-ExecStartPost=-/sbin/ip link set wlan0 up
-ExecStartPost=-/sbin/iw dev wlan0 set power_save off
+
+# Wait for interface {{LAN_IFACE}} to appear (up to 30s, no brittle fixed sleep)
+ExecStartPost=/bin/bash -c \
+  'for i in $(seq 1 30); do \
+     ip link show {{LAN_IFACE}} >/dev/null 2>&1 && break; \
+     echo "Waiting for {{LAN_IFACE}}... ($i/30)"; \
+     sleep 1; \
+   done; \
+   ip link show {{LAN_IFACE}} >/dev/null 2>&1 || \
+     { echo "ERROR: {{LAN_IFACE}} did not appear after 30s"; exit 1; }'
+
+# Assign static AP IP and bring interface up
+# Placeholder {{AP_IP}}/{{AP_CIDR}} and {{LAN_IFACE}} are replaced by install.sh
+ExecStartPost=-/sbin/ip addr add {{AP_IP}}/{{AP_CIDR}} dev {{LAN_IFACE}}
+ExecStartPost=-/sbin/ip link set {{LAN_IFACE}} up
+ExecStartPost=-/sbin/iw dev {{LAN_IFACE}} set power_save off
 
 [Install]
 WantedBy=multi-user.target
