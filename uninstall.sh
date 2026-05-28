@@ -54,15 +54,15 @@ ok "Config files removed"
 
 # ──────────────────────── Remove DKMS driver + firmware
 info "Removing AIC8800 DKMS driver and firmware"
-if dpkg -l | grep -q aic8800-usb-dkms; then
-  dpkg -r aic8800-usb-dkms && ok "aic8800-usb-dkms removed"
+if dpkg -l 2>/dev/null | grep -q aic8800-usb-dkms; then
+  apt purge -y aic8800-usb-dkms && ok "aic8800-usb-dkms removed"
 else
-  warn "aic8800-usb-dkms not found via dpkg"
+  warn "aic8800-usb-dkms not installed, skipping"
 fi
-if dpkg -l | grep -q aic8800-firmware; then
-  dpkg -r aic8800-firmware && ok "aic8800-firmware removed"
+if dpkg -l 2>/dev/null | grep -q aic8800-firmware; then
+  apt purge -y aic8800-firmware && ok "aic8800-firmware removed"
 else
-  warn "aic8800-firmware not found via dpkg"
+  warn "aic8800-firmware not installed, skipping"
 fi
 rm -rf /lib/firmware/aic8800D80 && ok "Firmware directory removed" || true
 
