@@ -3,11 +3,38 @@
 # https://github.com/OZAMNJ/aic8800d80-linux-fix
 #
 # Run as: sudo bash install.sh
+# Options:
+#   --dry-run          Show what would be done without making any changes
+#   --non-interactive  Use all defaults (no prompts) — set env vars to override
 #
 # Copyright (C) 2025 OZAMNJ
 # SPDX-License-Identifier: MIT
 
 set -euo pipefail
+
+# ─────────────────────────────────────────────────────────────────────
+# Parse flags
+# ─────────────────────────────────────────────────────────────────────
+DRY_RUN=false
+NON_INTERACTIVE=false
+
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run)            DRY_RUN=true ;;
+    --non-interactive)    NON_INTERACTIVE=true ;;
+    --help|-h)
+      echo "Usage: sudo bash install.sh [--dry-run] [--non-interactive]"
+      echo ""
+      echo "  --dry-run          Show all steps without making any changes"
+      echo "  --non-interactive  Use defaults; override with env vars:"
+      echo "    WAN_IFACE, LAN_IFACE, AP_IP, AP_CIDR, DHCP_START, DHCP_END"
+      echo "    NETMASK, LEASE_TIME, SSID, WPA_PSK, COUNTRY_CODE, CHANNEL"
+      echo "    USE_UNBOUND, PROTECT_SSH"
+      exit 0
+      ;;
+    *) echo "Unknown option: $arg (use --help for usage)"; exit 1 ;;
+  esac
+done
 
 # ─────────────────────────────────────────────────────────────────────
 # Constants
@@ -17,12 +44,12 @@ RADXA_REPO="https://github.com/radxa-pkg/aic8800"
 QUIRK="usb-storage.quirks=1111:1111:i"      # AIC8800D80 CD-ROM mode VID:PID
 CMDLINE_FILE="/boot/firmware/cmdline.txt"
 BACKUP_DIR="/var/backups/aic8800d80-install-$(date +%Y%m%d%H%M%S)"
-VERSION="3.0.0"
+VERSION="3.1.0"
 
 # ─────────────────────────────────────────────────────────────────────
-# Root check
+# Root check (skip in dry-run)
 # ─────────────────────────────────────────────────────────────────────
-if [[ $EUID -ne 0 ]]; then
+if [[ $EUID -ne 0 ]] && [[ "$DRY_RUN" == false ]]; then
   echo "ERROR: This script must be run as root."
   echo "Use: sudo bash install.sh"
   exit 1
@@ -38,18 +65,36 @@ ok()    { echo "  [ OK ] $*"; }
 warn()  { echo "  [WARN] $*"; }
 die()   { echo "  [ERR ] $*" >&2; exit 1; }
 step()  { echo; echo "──────────────────────────────────────────"; echo "  $*"; echo "──────────────────────────────────────────"; }
+dryrun(){ echo "  [DRY ] WOULD: $*"; }
+
+# Wrapper: run a command or print it in dry-run mode
+run() {
+  if [[ "$DRY_RUN" == true ]]; then
+    dryrun "$*"
+  else
+    eval "$*"
+  fi
+}
 
 # ─────────────────────────────────────────────────────────────────────
 # Input helpers
 # ─────────────────────────────────────────────────────────────────────
 prompt_default() {
   local prompt="$1" default="$2" value
+  if [[ "$NON_INTERACTIVE" == true ]]; then
+    echo "$default"
+    return
+  fi
   read -r -p "  $prompt [$default]: " value
   echo "${value:-$default}"
 }
 
 prompt_secret_default() {
   local prompt="$1" default="$2" value
+  if [[ "$NON_INTERACTIVE" == true ]]; then
+    echo "$default"
+    return
+  fi
   read -r -s -p "  $prompt [default hidden]: " value
   echo
   echo "${value:-$default}"
@@ -91,7 +136,6 @@ validate_cidr() {
 }
 
 validate_ip_in_subnet() {
-  # Check that IP is in subnet gateway/cidr using bash integer math
   local ip="$1" gw="$2" cidr="$3"
   local ip_int gw_int mask
   IFS='.' read -r a b c d <<< "$ip"
@@ -144,6 +188,10 @@ internet_ok() {
 download_file() {
   local url="$1" out="$2"
   info "Downloading: $(basename "$out")"
+  if [[ "$DRY_RUN" == true ]]; then
+    dryrun "wget/curl $url → $out"
+    return 0
+  fi
   if command_exists wget; then
     wget -q --show-progress -O "$out" "$url" || die "Download failed: $url"
   elif command_exists curl; then
@@ -169,9 +217,7 @@ resolve_aic_version() {
   if [[ -n "$latest_json" ]]; then
     latest_tag="$(echo "$latest_json" | grep '"tag_name"' | head -n1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"
     if [[ -n "$latest_tag" ]]; then
-      # tag is like "4.0+git20250410.b99ca8b6-3"
       AIC_VER="$latest_tag"
-      # URL-encode the + sign for the download URL
       local encoded_tag
       encoded_tag="$(echo "$latest_tag" | sed 's/+/%2B/g')"
       BASE_URL="${RADXA_REPO}/releases/download/${encoded_tag}"
@@ -186,11 +232,15 @@ resolve_aic_version() {
 }
 
 # ─────────────────────────────────────────────────────────────────────
-# Backup helper (used before modifying files)
+# Backup helper
 # ─────────────────────────────────────────────────────────────────────
 backup_file() {
   local f="$1"
   [[ -f "$f" ]] || return 0
+  if [[ "$DRY_RUN" == true ]]; then
+    dryrun "cp $f → $BACKUP_DIR$(dirname "$f")/$(basename "$f")"
+    return 0
+  fi
   local dest="${BACKUP_DIR}$(dirname "$f")"
   mkdir -p "$dest"
   cp "$f" "$dest/"
@@ -214,6 +264,7 @@ append_cmdline_quirk() {
 
   info "Adding usb-storage quirk to $CMDLINE_FILE"
   backup_file "$CMDLINE_FILE"
+  if [[ "$DRY_RUN" == true ]]; then return 0; fi
   local current
   current="$(tr -d '\n' < "$CMDLINE_FILE" | sed 's/[[:space:]]\+/ /g' | sed 's/^ //; s/ $//')"
   printf '%s %s\n' "$current" "$QUIRK" > "$CMDLINE_FILE"
@@ -226,6 +277,10 @@ append_cmdline_quirk() {
 enable_ip_forwarding() {
   info "Enabling IPv4 forwarding"
   backup_file "/etc/sysctl.conf"
+  if [[ "$DRY_RUN" == true ]]; then
+    dryrun "sysctl net.ipv4.ip_forward=1"
+    return 0
+  fi
   if grep -q '^#net.ipv4.ip_forward=1' /etc/sysctl.conf; then
     sed -i 's/^#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
   elif ! grep -q '^net.ipv4.ip_forward=1' /etc/sysctl.conf; then
@@ -240,6 +295,14 @@ enable_ip_forwarding() {
 # ─────────────────────────────────────────────────────────────────────
 install_nat_rules() {
   local wan="$1" lan="$2"
+
+  if [[ "$DRY_RUN" == true ]]; then
+    dryrun "iptables -t nat -A POSTROUTING -o $wan -j MASQUERADE"
+    dryrun "iptables -A FORWARD -i $lan -o $wan -j ACCEPT"
+    dryrun "iptables -A FORWARD -i $wan -o $lan -m state --state RELATED,ESTABLISHED -j ACCEPT"
+    dryrun "netfilter-persistent save"
+    return 0
+  fi
 
   info "Applying NAT rules (iptables)"
   iptables -t nat -C POSTROUTING -o "$wan" -j MASQUERADE 2>/dev/null || \
@@ -257,7 +320,6 @@ install_nat_rules() {
     iptables-save > /etc/iptables/rules.v4
     info "Rules written to /etc/iptables/rules.v4"
   }
-
   ok "NAT rules installed and persisted"
 }
 
@@ -300,8 +362,11 @@ verify_driver_post_install() {
 echo
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║     AIC8800D80 Linux Fix — Fully Interactive Installer       ║"
-echo "║     v${VERSION}   https://github.com/OZAMNJ/aic8800d80-linux-fix  ║"
+echo "║     v${VERSION}  https://github.com/OZAMNJ/aic8800d80-linux-fix   ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
+echo
+[[ "$DRY_RUN" == true ]] && warn "DRY-RUN MODE — no changes will be made to your system"
+[[ "$NON_INTERACTIVE" == true ]] && info "NON-INTERACTIVE MODE — using defaults / environment variables"
 echo
 echo "  IMPORTANT: Connect your Raspberry Pi to wired LAN/Ethernet"
 echo "  BEFORE running this installer. Active internet is required to"
@@ -311,9 +376,13 @@ echo
 # ─────────────────────────────────────────────────────────────────────
 # Internet check
 # ─────────────────────────────────────────────────────────────────────
-info "Checking internet connectivity..."
-internet_ok || die "No internet connection detected. Connect LAN/Ethernet and retry."
-ok "Internet connection confirmed"
+if [[ "$DRY_RUN" == false ]]; then
+  info "Checking internet connectivity..."
+  internet_ok || die "No internet connection detected. Connect LAN/Ethernet and retry."
+  ok "Internet connection confirmed"
+else
+  dryrun "Check internet connectivity"
+fi
 
 # ─────────────────────────────────────────────────────────────────────
 # Architecture check
@@ -321,8 +390,10 @@ ok "Internet connection confirmed"
 ARCH="$(uname -m)"
 if [[ "$ARCH" != "aarch64" && "$ARCH" != "armv7l" ]]; then
   warn "Unexpected architecture: $ARCH — this guide targets arm64/armv7l (Raspberry Pi OS)"
-  read -r -p "  Continue anyway? (yes/no) [no]: " arch_ok
-  [[ "${arch_ok:-no}" =~ ^([Yy][Ee][Ss]|[Yy])$ ]] || die "Aborted"
+  if [[ "$NON_INTERACTIVE" == false ]]; then
+    read -r -p "  Continue anyway? (yes/no) [no]: " arch_ok
+    [[ "${arch_ok:-no}" =~ ^([Yy][Ee][Ss]|[Yy])$ ]] || die "Aborted"
+  fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────
@@ -348,12 +419,17 @@ step "Configuration prompts"
 
 # WAN interface
 while true; do
-  WAN_IFACE="$(prompt_default "WAN/uplink interface (has internet)" "eth0")"
+  WAN_IFACE="${WAN_IFACE:-$(prompt_default "WAN/uplink interface (has internet)" "eth0")}"
   if iface_exists "$WAN_IFACE"; then
     ok "WAN interface '$WAN_IFACE' found"
     break
+  elif [[ "$DRY_RUN" == true ]]; then
+    warn "Dry-run: skipping interface existence check for $WAN_IFACE"
+    break
   else
     warn "Interface '$WAN_IFACE' not found. Available: $(list_ifaces | tr '\n' ' ')"
+    if [[ "$NON_INTERACTIVE" == true ]]; then die "WAN interface '$WAN_IFACE' not found"; fi
+    unset WAN_IFACE
     read -r -p "  Try again? (yes/no) [yes]: " retry
     [[ "${retry:-yes}" =~ ^([Yy][Ee][Ss]|[Yy])$ ]] || die "Aborted"
   fi
@@ -361,13 +437,14 @@ done
 
 # LAN/AP interface
 while true; do
-  LAN_IFACE="$(prompt_default "LAN/AP WiFi interface (AIC8800D80 will become this)" "wlan0")"
+  LAN_IFACE="${LAN_IFACE:-$(prompt_default "LAN/AP WiFi interface (AIC8800D80 will become this)" "wlan0")}"
   if [[ "$LAN_IFACE" == "$WAN_IFACE" ]]; then
     warn "LAN and WAN interface cannot be the same"
+    unset LAN_IFACE
     continue
   fi
   if ! iface_exists "$LAN_IFACE"; then
-    warn "Interface '$LAN_IFACE' not yet visible (the AIC8800D80 driver may not be active yet — this is normal before reboot)"
+    warn "Interface '$LAN_IFACE' not yet visible (normal before AIC8800D80 driver is active)"
   else
     ok "LAN/AP interface '$LAN_IFACE' found"
   fi
@@ -376,92 +453,111 @@ done
 
 # AP gateway IP
 while true; do
-  AP_IP="$(prompt_default "AP gateway IP" "192.168.73.1")"
+  AP_IP="${AP_IP:-$(prompt_default "AP gateway IP" "192.168.73.1")}"
   if validate_ip "$AP_IP"; then
     ok "AP gateway IP: $AP_IP"
     break
   else
     warn "'$AP_IP' is not a valid IP address"
+    if [[ "$NON_INTERACTIVE" == true ]]; then die "Invalid AP_IP: $AP_IP"; fi
+    unset AP_IP
   fi
 done
 
 # CIDR
 while true; do
-  AP_CIDR="$(prompt_default "AP subnet CIDR bits" "24")"
+  AP_CIDR="${AP_CIDR:-$(prompt_default "AP subnet CIDR bits" "24")}"
   if validate_cidr "$AP_CIDR"; then
     ok "CIDR: /$AP_CIDR"
     break
   else
     warn "CIDR must be 1–30"
+    if [[ "$NON_INTERACTIVE" == true ]]; then die "Invalid AP_CIDR: $AP_CIDR"; fi
+    unset AP_CIDR
   fi
 done
 
-# DHCP range
+# DHCP start
 while true; do
-  DHCP_START="$(prompt_default "DHCP start IP" "192.168.73.10")"
+  DHCP_START="${DHCP_START:-$(prompt_default "DHCP start IP" "192.168.73.10")}"
   if ! validate_ip "$DHCP_START"; then
-    warn "'$DHCP_START' is not a valid IP"; continue
+    warn "'$DHCP_START' is not a valid IP"
+    if [[ "$NON_INTERACTIVE" == true ]]; then die "Invalid DHCP_START: $DHCP_START"; fi
+    unset DHCP_START; continue
   fi
   if ! validate_ip_in_subnet "$DHCP_START" "$AP_IP" "$AP_CIDR"; then
-    warn "$DHCP_START is not inside $AP_IP/$AP_CIDR subnet"; continue
+    warn "$DHCP_START is not inside $AP_IP/$AP_CIDR subnet"
+    if [[ "$NON_INTERACTIVE" == true ]]; then die "DHCP_START out of subnet"; fi
+    unset DHCP_START; continue
   fi
   ok "DHCP start: $DHCP_START"; break
 done
 
+# DHCP end
 while true; do
-  DHCP_END="$(prompt_default "DHCP end IP" "192.168.73.100")"
+  DHCP_END="${DHCP_END:-$(prompt_default "DHCP end IP" "192.168.73.100")}"
   if ! validate_ip "$DHCP_END"; then
-    warn "'$DHCP_END' is not a valid IP"; continue
+    warn "'$DHCP_END' is not a valid IP"
+    if [[ "$NON_INTERACTIVE" == true ]]; then die "Invalid DHCP_END: $DHCP_END"; fi
+    unset DHCP_END; continue
   fi
   if ! validate_ip_in_subnet "$DHCP_END" "$AP_IP" "$AP_CIDR"; then
-    warn "$DHCP_END is not inside $AP_IP/$AP_CIDR subnet"; continue
+    warn "$DHCP_END is not inside $AP_IP/$AP_CIDR subnet"
+    if [[ "$NON_INTERACTIVE" == true ]]; then die "DHCP_END out of subnet"; fi
+    unset DHCP_END; continue
   fi
   ok "DHCP end: $DHCP_END"; break
 done
 
-NETMASK="$(prompt_default "DHCP netmask" "255.255.255.0")"
-LEASE_TIME="$(prompt_default "DHCP lease time" "24h")"
+NETMASK="${NETMASK:-$(prompt_default "DHCP netmask" "255.255.255.0")}"
+LEASE_TIME="${LEASE_TIME:-$(prompt_default "DHCP lease time" "24h")}"
 
 # SSID
-SSID="$(prompt_default "WiFi SSID" "TravelRouter")"
+SSID="${SSID:-$(prompt_default "WiFi SSID" "TravelRouter")}"
 [[ -n "$SSID" ]] || die "SSID cannot be empty"
 
 # Password
 while true; do
-  WPA_PSK="$(prompt_secret_default "WiFi password (8–63 chars)" "ChangeMe123")"
+  WPA_PSK="${WPA_PSK:-$(prompt_secret_default "WiFi password (8–63 chars)" "ChangeMe123")}"
   if validate_wpa_passphrase "$WPA_PSK"; then
     ok "Password length OK"
     break
   else
     warn "Password must be 8–63 characters"
+    if [[ "$NON_INTERACTIVE" == true ]]; then die "Invalid WPA_PSK length"; fi
+    unset WPA_PSK
   fi
 done
 
 # Country code
 while true; do
-  COUNTRY_CODE="$(prompt_default "WiFi country code (ISO 3166-1 alpha-2, e.g. DE)" "DE")"
+  COUNTRY_CODE="${COUNTRY_CODE:-$(prompt_default "WiFi country code (ISO 3166-1 alpha-2, e.g. DE)" "DE")}"
   COUNTRY_CODE="${COUNTRY_CODE^^}"
   if validate_country_code "$COUNTRY_CODE"; then
     ok "Country code: $COUNTRY_CODE"
     break
   else
     warn "Country code must be exactly 2 uppercase letters (e.g. DE, US, GB)"
+    if [[ "$NON_INTERACTIVE" == true ]]; then die "Invalid COUNTRY_CODE: $COUNTRY_CODE"; fi
+    unset COUNTRY_CODE
   fi
 done
 
 # Channel
 while true; do
-  CHANNEL="$(prompt_default "WiFi channel (2.4GHz: 1/6/11  5GHz: 36/40/44/48)" "6")"
+  CHANNEL="${CHANNEL:-$(prompt_default "WiFi channel (2.4GHz: 1/6/11  5GHz: 36/40/44/48)" "6")}"
   if validate_channel "$CHANNEL"; then
     ok "Channel: $CHANNEL"
     break
   else
     warn "Invalid channel. Common 2.4GHz: 1,6,11 — Common 5GHz: 36,40,44,48"
+    if [[ "$NON_INTERACTIVE" == true ]]; then die "Invalid CHANNEL: $CHANNEL"; fi
+    unset CHANNEL
   fi
 done
 
-USE_UNBOUND="$(prompt_default "Use Unbound/system DNS on port 53? (yes/no)" "yes")"
-PROTECT_SSH="$(prompt_default "Add SSH protection rule on WAN interface? (yes/no)" "yes")"
+USE_UNBOUND="${USE_UNBOUND:-$(prompt_default "Use Unbound/system DNS on port 53? (yes/no)" "yes")}"
+PROTECT_SSH="${PROTECT_SSH:-$(prompt_default "Add SSH protection rule on WAN interface? (yes/no)" "yes")}"
 
 # WAN overlap check
 CURRENT_WAN_IP="$(ip -4 addr show "$WAN_IFACE" 2>/dev/null | awk '/inet /{print $2}' | head -n1 | cut -d/ -f1 || true)"
@@ -484,62 +580,73 @@ echo "  Channel        : $CHANNEL"
 echo "  Use Unbound    : $USE_UNBOUND"
 echo "  Protect SSH    : $PROTECT_SSH"
 echo "  AIC8800 ver    : $AIC_VER"
+echo "  Dry-run mode   : $DRY_RUN"
 echo
-read -r -p "  Continue with these settings? (yes/no) [yes]: " CONFIRM
-CONFIRM="${CONFIRM:-yes}"
-[[ "$CONFIRM" =~ ^([Yy][Ee][Ss]|[Yy])$ ]] || die "Aborted"
+
+if [[ "$NON_INTERACTIVE" == false && "$DRY_RUN" == false ]]; then
+  read -r -p "  Continue with these settings? (yes/no) [yes]: " CONFIRM
+  CONFIRM="${CONFIRM:-yes}"
+  [[ "$CONFIRM" =~ ^([Yy][Ee][Ss]|[Yy])$ ]] || die "Aborted"
+fi
 
 # ─────────────────────────────────────────────────────────────────────
 # Preflight: check repo files are present
 # ─────────────────────────────────────────────────────────────────────
-require_file "$SCRIPT_DIR/etc/modprobe.d/aic8800-blacklist.conf"
-require_file "$SCRIPT_DIR/etc/udev/rules.d/99-aic8800-switch.rules"
-require_file "$SCRIPT_DIR/etc/systemd/system/aic8800-switch.service"
-require_file "$SCRIPT_DIR/etc/systemd/system/hostapd.service.d/wait-for-switch.conf"
-require_file "$SCRIPT_DIR/etc/systemd/system/dnsmasq.service.d/wait-for-switch.conf"
-require_file "$SCRIPT_DIR/etc/hostapd/hostapd.conf"
-require_file "$SCRIPT_DIR/etc/default/hostapd"
-require_file "$SCRIPT_DIR/etc/dnsmasq.d/travel-ap.conf"
-require_file "$SCRIPT_DIR/etc/NetworkManager/conf.d/99-aic-ap.conf"
-
-mkdir -p "$BACKUP_DIR"
-info "Backups will be saved to: $BACKUP_DIR"
+if [[ "$DRY_RUN" == false ]]; then
+  require_file "$SCRIPT_DIR/etc/modprobe.d/aic8800-blacklist.conf"
+  require_file "$SCRIPT_DIR/etc/udev/rules.d/99-aic8800-switch.rules"
+  require_file "$SCRIPT_DIR/etc/systemd/system/aic8800-switch.service"
+  require_file "$SCRIPT_DIR/etc/systemd/system/hostapd.service.d/wait-for-switch.conf"
+  require_file "$SCRIPT_DIR/etc/systemd/system/dnsmasq.service.d/wait-for-switch.conf"
+  require_file "$SCRIPT_DIR/etc/hostapd/hostapd.conf"
+  require_file "$SCRIPT_DIR/etc/default/hostapd"
+  require_file "$SCRIPT_DIR/etc/dnsmasq.d/travel-ap.conf"
+  require_file "$SCRIPT_DIR/etc/NetworkManager/conf.d/99-aic-ap.conf"
+  mkdir -p "$BACKUP_DIR"
+  info "Backups will be saved to: $BACKUP_DIR"
+fi
 
 # ─────────────────────────────────────────────────────────────────────
 # STEP 1: Install packages
 # ─────────────────────────────────────────────────────────────────────
 step "[1/8] Installing prerequisites"
-export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y \
-  dkms \
-  "linux-headers-$(uname -r)" \
-  usb-modeswitch \
-  hostapd \
-  dnsmasq \
-  wget \
-  curl \
-  ca-certificates \
-  iproute2 \
-  iptables \
-  iptables-persistent \
-  netfilter-persistent
-ok "Prerequisites installed"
+if [[ "$DRY_RUN" == true ]]; then
+  dryrun "apt-get install dkms linux-headers-$(uname -r) usb-modeswitch hostapd dnsmasq wget curl ca-certificates iproute2 iptables iptables-persistent netfilter-persistent"
+else
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y \
+    dkms \
+    "linux-headers-$(uname -r)" \
+    usb-modeswitch \
+    hostapd \
+    dnsmasq \
+    wget \
+    curl \
+    ca-certificates \
+    iproute2 \
+    iptables \
+    iptables-persistent \
+    netfilter-persistent
+  ok "Prerequisites installed"
+fi
 
 # ─────────────────────────────────────────────────────────────────────
 # STEP 2: SSH protection
 # ─────────────────────────────────────────────────────────────────────
 step "[2/8] SSH protection"
 if [[ "$PROTECT_SSH" =~ ^([Yy][Ee][Ss]|[Yy])$ ]]; then
-  info "Installing SSH protection rule on $WAN_IFACE"
-  iptables -C INPUT -i "$WAN_IFACE" -p tcp --dport 22 -j ACCEPT 2>/dev/null || \
-    iptables -I INPUT 1 -i "$WAN_IFACE" -p tcp --dport 22 -j ACCEPT
-
-  iptables -C INPUT -i "$WAN_IFACE" -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || \
-    iptables -I INPUT 2 -i "$WAN_IFACE" -m state --state ESTABLISHED,RELATED -j ACCEPT
-
-  netfilter-persistent save >/dev/null 2>&1 || true
-  ok "SSH protection installed on $WAN_IFACE"
+  if [[ "$DRY_RUN" == true ]]; then
+    dryrun "iptables -I INPUT 1 -i $WAN_IFACE -p tcp --dport 22 -j ACCEPT"
+  else
+    info "Installing SSH protection rule on $WAN_IFACE"
+    iptables -C INPUT -i "$WAN_IFACE" -p tcp --dport 22 -j ACCEPT 2>/dev/null || \
+      iptables -I INPUT 1 -i "$WAN_IFACE" -p tcp --dport 22 -j ACCEPT
+    iptables -C INPUT -i "$WAN_IFACE" -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || \
+      iptables -I INPUT 2 -i "$WAN_IFACE" -m state --state ESTABLISHED,RELATED -j ACCEPT
+    netfilter-persistent save >/dev/null 2>&1 || true
+    ok "SSH protection installed on $WAN_IFACE"
+  fi
 else
   info "Skipping SSH protection rule"
 fi
@@ -548,28 +655,31 @@ fi
 # STEP 3: Download + verify + install AIC8800 driver
 # ─────────────────────────────────────────────────────────────────────
 step "[3/8] Downloading and installing AIC8800 firmware + DKMS"
-
 rm -f "/tmp/${FW_DEB}" "/tmp/${DKMS_DEB}"
 download_file "${BASE_URL}/${FW_DEB}" "/tmp/${FW_DEB}"
 download_file "${BASE_URL}/${DKMS_DEB}" "/tmp/${DKMS_DEB}"
 
-verify_deb_file "/tmp/${FW_DEB}"
-verify_deb_file "/tmp/${DKMS_DEB}"
+if [[ "$DRY_RUN" == false ]]; then
+  verify_deb_file "/tmp/${FW_DEB}"
+  verify_deb_file "/tmp/${DKMS_DEB}"
 
-info "Removing any stale firmware from previous installs"
-rm -rf /lib/firmware/aic8800D80
+  info "Removing any stale firmware from previous installs"
+  rm -rf /lib/firmware/aic8800D80
 
-info "Installing firmware package"
-dpkg -i "/tmp/${FW_DEB}"
+  info "Installing firmware package"
+  dpkg -i "/tmp/${FW_DEB}"
 
-info "Installing DKMS package (will compile kernel module)"
-dpkg -i "/tmp/${DKMS_DEB}" || {
-  warn "dpkg returned non-zero, attempting apt-get -f install to fix dependencies"
-  apt-get -f install -y
-  dpkg -i "/tmp/${DKMS_DEB}"
-}
-
-verify_driver_post_install
+  info "Installing DKMS package (will compile kernel module)"
+  dpkg -i "/tmp/${DKMS_DEB}" || {
+    warn "dpkg returned non-zero, attempting apt-get -f install to fix dependencies"
+    apt-get -f install -y
+    dpkg -i "/tmp/${DKMS_DEB}"
+  }
+  verify_driver_post_install
+else
+  dryrun "dpkg -i $FW_DEB"
+  dryrun "dpkg -i $DKMS_DEB"
+fi
 
 # ─────────────────────────────────────────────────────────────────────
 # STEP 4: Prepare customized config files
@@ -579,94 +689,90 @@ TMP_DIR="$(mktemp -d)"
 export TMP_DIR
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-cp -a "$SCRIPT_DIR/etc" "$TMP_DIR/"
+if [[ "$DRY_RUN" == false ]]; then
+  cp -a "$SCRIPT_DIR/etc" "$TMP_DIR/"
 
-# Backup before modifying
-backup_file "/etc/hostapd/hostapd.conf"
-backup_file "/etc/dnsmasq.d/travel-ap.conf"
-backup_file "/etc/NetworkManager/conf.d/99-aic-ap.conf"
-backup_file "/etc/systemd/system/aic8800-switch.service"
-backup_file "/etc/default/hostapd"
+  backup_file "/etc/hostapd/hostapd.conf"
+  backup_file "/etc/dnsmasq.d/travel-ap.conf"
+  backup_file "/etc/NetworkManager/conf.d/99-aic-ap.conf"
+  backup_file "/etc/systemd/system/aic8800-switch.service"
+  backup_file "/etc/default/hostapd"
 
-sed -i \
-  -e "s/^interface=.*/interface=${LAN_IFACE}/" \
-  -e "s/^ssid=.*/ssid=${SSID}/" \
-  -e "s/^channel=.*/channel=${CHANNEL}/" \
-  -e "s/^wpa_passphrase=.*/wpa_passphrase=${WPA_PSK}/" \
-  -e "s/^country_code=.*/country_code=${COUNTRY_CODE}/" \
-  "$TMP_DIR/etc/hostapd/hostapd.conf"
+  sed -i \
+    -e "s/^interface=.*/interface=${LAN_IFACE}/" \
+    -e "s/^ssid=.*/ssid=${SSID}/" \
+    -e "s/^channel=.*/channel=${CHANNEL}/" \
+    -e "s/^wpa_passphrase=.*/wpa_passphrase=${WPA_PSK}/" \
+    -e "s/^country_code=.*/country_code=${COUNTRY_CODE}/" \
+    "$TMP_DIR/etc/hostapd/hostapd.conf"
 
-sed -i \
-  -e "s/^interface=.*/interface=${LAN_IFACE}/" \
-  -e "s/^dhcp-range=.*/dhcp-range=${DHCP_START},${DHCP_END},${NETMASK},${LEASE_TIME}/" \
-  -e "s/^dhcp-option=3,.*/dhcp-option=3,${AP_IP}/" \
-  -e "s/^dhcp-option=6,.*/dhcp-option=6,${AP_IP}/" \
-  "$TMP_DIR/etc/dnsmasq.d/travel-ap.conf"
+  sed -i \
+    -e "s/^interface=.*/interface=${LAN_IFACE}/" \
+    -e "s/^dhcp-range=.*/dhcp-range=${DHCP_START},${DHCP_END},${NETMASK},${LEASE_TIME}/" \
+    -e "s/^dhcp-option=3,.*/dhcp-option=3,${AP_IP}/" \
+    -e "s/^dhcp-option=6,.*/dhcp-option=6,${AP_IP}/" \
+    "$TMP_DIR/etc/dnsmasq.d/travel-ap.conf"
 
-if [[ "$USE_UNBOUND" =~ ^([Nn][Oo]|[Nn])$ ]]; then
-  sed -i 's/^port=0/# port=0 disabled by installer/' "$TMP_DIR/etc/dnsmasq.d/travel-ap.conf" || true
-  cat >> "$TMP_DIR/etc/dnsmasq.d/travel-ap.conf" <<'EODNS'
+  if [[ "$USE_UNBOUND" =~ ^([Nn][Oo]|[Nn])$ ]]; then
+    sed -i 's/^port=0/# port=0 disabled by installer/' "$TMP_DIR/etc/dnsmasq.d/travel-ap.conf" || true
+    cat >> "$TMP_DIR/etc/dnsmasq.d/travel-ap.conf" <<'EODNS'
 
 # Upstream DNS (Unbound disabled)
 server=8.8.8.8
 server=8.8.4.4
 no-resolv
 EODNS
-fi
+  fi
 
-cat > "$TMP_DIR/etc/NetworkManager/conf.d/99-aic-ap.conf" <<EONM
+  cat > "$TMP_DIR/etc/NetworkManager/conf.d/99-aic-ap.conf" <<EONM
 [keyfile]
 unmanaged-devices=interface-name:${LAN_IFACE}
 EONM
 
-sed -i \
-  -e "s|ip addr add [0-9.]\\+/[0-9]\\+ dev wlan0|ip addr add ${AP_IP}/${AP_CIDR} dev ${LAN_IFACE}|" \
-  -e "s|ip link set wlan0 up|ip link set ${LAN_IFACE} up|" \
-  -e "s|iw dev wlan0 set power_save off|iw dev ${LAN_IFACE} set power_save off|" \
-  "$TMP_DIR/etc/systemd/system/aic8800-switch.service"
-
-ok "Configs customized"
+  sed -i \
+    -e "s|ip addr add [0-9.]\\+/[0-9]\\+ dev wlan0|ip addr add ${AP_IP}/${AP_CIDR} dev ${LAN_IFACE}|" \
+    -e "s|ip link set wlan0 up|ip link set ${LAN_IFACE} up|" \
+    -e "s|iw dev wlan0 set power_save off|iw dev ${LAN_IFACE} set power_save off|" \
+    "$TMP_DIR/etc/systemd/system/aic8800-switch.service"
+  ok "Configs customized"
+else
+  dryrun "Patch hostapd.conf, dnsmasq.conf, NetworkManager, aic8800-switch.service with user values"
+fi
 
 # ─────────────────────────────────────────────────────────────────────
 # STEP 5: Copy configs to system
 # ─────────────────────────────────────────────────────────────────────
 step "[5/8] Installing config files to system"
-
-mkdir -p /etc/modprobe.d
-cp "$TMP_DIR/etc/modprobe.d/aic8800-blacklist.conf" /etc/modprobe.d/
-
-mkdir -p /etc/udev/rules.d
-cp "$TMP_DIR/etc/udev/rules.d/99-aic8800-switch.rules" /etc/udev/rules.d/
-
-mkdir -p /etc/systemd/system
-cp "$TMP_DIR/etc/systemd/system/aic8800-switch.service" /etc/systemd/system/
-
-mkdir -p /etc/systemd/system/hostapd.service.d
-cp "$TMP_DIR/etc/systemd/system/hostapd.service.d/wait-for-switch.conf" \
-   /etc/systemd/system/hostapd.service.d/
-
-mkdir -p /etc/systemd/system/dnsmasq.service.d
-cp "$TMP_DIR/etc/systemd/system/dnsmasq.service.d/wait-for-switch.conf" \
-   /etc/systemd/system/dnsmasq.service.d/
-
-mkdir -p /etc/hostapd
-cp "$TMP_DIR/etc/hostapd/hostapd.conf" /etc/hostapd/
-
-cp "$TMP_DIR/etc/default/hostapd" /etc/default/hostapd
-
-mkdir -p /etc/dnsmasq.d
-cp "$TMP_DIR/etc/dnsmasq.d/travel-ap.conf" /etc/dnsmasq.d/
-
-mkdir -p /etc/NetworkManager/conf.d
-cp "$TMP_DIR/etc/NetworkManager/conf.d/99-aic-ap.conf" /etc/NetworkManager/conf.d/
-
-ok "Config files installed"
+if [[ "$DRY_RUN" == false ]]; then
+  mkdir -p /etc/modprobe.d
+  cp "$TMP_DIR/etc/modprobe.d/aic8800-blacklist.conf" /etc/modprobe.d/
+  mkdir -p /etc/udev/rules.d
+  cp "$TMP_DIR/etc/udev/rules.d/99-aic8800-switch.rules" /etc/udev/rules.d/
+  mkdir -p /etc/systemd/system
+  cp "$TMP_DIR/etc/systemd/system/aic8800-switch.service" /etc/systemd/system/
+  mkdir -p /etc/systemd/system/hostapd.service.d
+  cp "$TMP_DIR/etc/systemd/system/hostapd.service.d/wait-for-switch.conf" /etc/systemd/system/hostapd.service.d/
+  mkdir -p /etc/systemd/system/dnsmasq.service.d
+  cp "$TMP_DIR/etc/systemd/system/dnsmasq.service.d/wait-for-switch.conf" /etc/systemd/system/dnsmasq.service.d/
+  mkdir -p /etc/hostapd
+  cp "$TMP_DIR/etc/hostapd/hostapd.conf" /etc/hostapd/
+  cp "$TMP_DIR/etc/default/hostapd" /etc/default/hostapd
+  mkdir -p /etc/dnsmasq.d
+  cp "$TMP_DIR/etc/dnsmasq.d/travel-ap.conf" /etc/dnsmasq.d/
+  mkdir -p /etc/NetworkManager/conf.d
+  cp "$TMP_DIR/etc/NetworkManager/conf.d/99-aic-ap.conf" /etc/NetworkManager/conf.d/
+  ok "Config files installed"
+else
+  dryrun "Copy all config files to /etc/modprobe.d, /etc/udev/rules.d, /etc/systemd/system, /etc/hostapd, /etc/dnsmasq.d, /etc/NetworkManager/conf.d"
+fi
 
 # ─────────────────────────────────────────────────────────────────────
 # STEP 6: Validate + configure system
 # ─────────────────────────────────────────────────────────────────────
 step "[6/8] Validating + configuring system"
-validate_hostapd_conf /etc/hostapd/hostapd.conf
+if [[ "$DRY_RUN" == false ]]; then
+  validate_hostapd_conf /etc/hostapd/hostapd.conf
+fi
 append_cmdline_quirk
 enable_ip_forwarding
 install_nat_rules "$WAN_IFACE" "$LAN_IFACE"
@@ -676,13 +782,17 @@ ok "System configuration complete"
 # STEP 7: Enable services
 # ─────────────────────────────────────────────────────────────────────
 step "[7/8] Enabling services"
-systemctl daemon-reload
-udevadm control --reload-rules
-update-initramfs -u 2>/dev/null || true
-systemctl restart NetworkManager 2>/dev/null || true
-systemctl unmask hostapd 2>/dev/null || true
-systemctl enable aic8800-switch hostapd dnsmasq
-ok "Services enabled"
+if [[ "$DRY_RUN" == false ]]; then
+  systemctl daemon-reload
+  udevadm control --reload-rules
+  update-initramfs -u 2>/dev/null || true
+  systemctl restart NetworkManager 2>/dev/null || true
+  systemctl unmask hostapd 2>/dev/null || true
+  systemctl enable aic8800-switch hostapd dnsmasq
+  ok "Services enabled"
+else
+  dryrun "systemctl enable aic8800-switch hostapd dnsmasq"
+fi
 
 # ─────────────────────────────────────────────────────────────────────
 # STEP 8: Summary
@@ -690,24 +800,29 @@ ok "Services enabled"
 step "[8/8] Installation complete"
 echo
 echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║                 Installation complete!                       ║"
+[[ "$DRY_RUN" == true ]] && \
+echo "║              DRY-RUN COMPLETE — no changes made               ║" || \
+echo "║                 Installation complete!                        ║"
 echo "╠══════════════════════════════════════════════════════════════╣"
-printf "║  %-20s  %-37s ║\n" "WAN interface"  "$WAN_IFACE"
-printf "║  %-20s  %-37s ║\n" "LAN/AP iface"   "$LAN_IFACE"
-printf "║  %-20s  %-37s ║\n" "AP gateway"     "$AP_IP/$AP_CIDR"
-printf "║  %-20s  %-37s ║\n" "DHCP range"     "$DHCP_START – $DHCP_END"
-printf "║  %-20s  %-37s ║\n" "SSID"           "$SSID"
+printf "║  %-20s  %-37s ║\n" "WAN interface"   "$WAN_IFACE"
+printf "║  %-20s  %-37s ║\n" "LAN/AP iface"    "$LAN_IFACE"
+printf "║  %-20s  %-37s ║\n" "AP gateway"      "$AP_IP/$AP_CIDR"
+printf "║  %-20s  %-37s ║\n" "DHCP range"      "$DHCP_START – $DHCP_END"
+printf "║  %-20s  %-37s ║\n" "SSID"            "$SSID"
 printf "║  %-20s  %-37s ║\n" "Country/Channel" "$COUNTRY_CODE / ch$CHANNEL"
 printf "║  %-20s  %-37s ║\n" "AIC8800 version" "$AIC_VER"
-printf "║  %-20s  %-37s ║\n" "Backups saved"  "$BACKUP_DIR"
+[[ "$DRY_RUN" == false ]] && \
+printf "║  %-20s  %-37s ║\n" "Backups saved"   "$BACKUP_DIR"
 echo "╠══════════════════════════════════════════════════════════════╣"
-echo "║  Next: reboot                                                ║"
-echo "║    sudo reboot                                               ║"
+if [[ "$DRY_RUN" == false ]]; then
+echo "║  Next: reboot                                                 ║"
+echo "║    sudo reboot                                                ║"
 echo "╠══════════════════════════════════════════════════════════════╣"
-echo "║  After reboot, verify:                                       ║"
-echo "║    lsusb | grep a69c          (expect a69c:8d81)             ║"
-echo "║    ip addr show $LAN_IFACE"
-printf  "║    %-58s ║\n" "systemctl status aic8800-switch hostapd dnsmasq"
-echo "║    dkms status                (expect aic8800-usb installed) ║"
-echo "║    ping -c3 8.8.8.8           (from WiFi client)             ║"
+echo "║  After reboot, verify:                                        ║"
+echo "║    lsusb | grep a69c          (expect a69c:8d81)              ║"
+printf "║    ip addr show %-45s ║\n" "$LAN_IFACE"
+echo "║    systemctl status aic8800-switch hostapd dnsmasq            ║"
+echo "║    dkms status                (expect aic8800-usb installed)  ║"
+echo "║    ping -c3 8.8.8.8           (from WiFi client)              ║"
+fi
 echo "╚══════════════════════════════════════════════════════════════╝"
