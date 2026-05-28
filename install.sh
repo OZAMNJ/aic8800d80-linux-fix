@@ -17,6 +17,20 @@
 
 set -euo pipefail
 
+# ─── Argument parsing ─────────────────────────────────────────────────────────
+DRY_RUN=false
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=true ;;
+    --help|-h)
+      echo "Usage: sudo bash install.sh [--dry-run]"
+      echo "  --dry-run   Show what would be done without making any changes"
+      exit 0 ;;
+    *) echo "Unknown argument: $arg" >&2; exit 1 ;;
+  esac
+done
+$DRY_RUN && echo -e "\033[1;33m[WARN]\033[0m DRY-RUN mode: no changes will be written to disk."
+
 # ──────────────────────── Colour helpers
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
@@ -68,6 +82,7 @@ internet_ok() {
 # Safe placeholder templating: sed 's|{{KEY}}|value|g'
 # Much safer than the previous regex-based sed approach
 apply_template() {
+    $DRY_RUN && { info "[DRY-RUN] Would template: $1"; return 0; }
   local file="$1"; shift
   while [[ $# -ge 2 ]]; do
     local key="$1" val="$2"; shift 2
@@ -76,6 +91,7 @@ apply_template() {
 }
 
 append_cmdline_quirk() {
+
   if [[ ! -f "$CMDLINE_FILE" ]]; then
     warn "$CMDLINE_FILE not found — add '$QUIRK' to your kernel cmdline manually"
     return 0
@@ -93,6 +109,7 @@ append_cmdline_quirk() {
 }
 
 enable_ip_forwarding() {
+    $DRY_RUN && { info "[DRY-RUN] Would enable IPv4 forwarding"; return 0; }
   info "Enabling IPv4 forwarding"
   if grep -q '^#*net.ipv4.ip_forward' /etc/sysctl.conf; then
     sed -i 's|^#*net.ipv4.ip_forward.*|net.ipv4.ip_forward=1|' /etc/sysctl.conf
@@ -104,6 +121,7 @@ enable_ip_forwarding() {
 }
 
 install_nat_rules() {
+    $DRY_RUN && { info "[DRY-RUN] Would install NAT rules (WAN=$1 LAN=$2)"; return 0; }
   local wan="$1" lan="$2"
   info "Installing persistent NAT rules (WAN=$wan LAN=$lan)"
   DEBIAN_FRONTEND=noninteractive apt-get install -y \
