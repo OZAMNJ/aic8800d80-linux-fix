@@ -12,15 +12,63 @@
 
 ## ⚡ Quick Start — Interactive Installer
 
-> **The fastest way to get running.** Clone this repo, run the installer, answer the prompts — done.
+## Fully Automated Install
+
+Use the interactive installer if you want the repo to configure everything end-to-end.
+
+### Before you start
+- Connect your Raspberry Pi to **wired LAN/Ethernet with active internet**
+- Keep SSH on the wired interface if you are working remotely
+- Make sure the AIC8800D80 USB dongle is plugged in
+
+The installer needs internet because it will:
+- install required packages with `apt`
+- download the official `radxa-pkg` AIC8800 firmware and DKMS packages from GitHub
+- patch the repo config files with your chosen WAN/LAN/IP/SSID settings
+- configure `cmdline.txt`, IP forwarding, NAT, and service startup automatically
+
+### Run it
 
 ```bash
-# 1. Clone the repo
 git clone https://github.com/OZAMNJ/aic8800d80-linux-fix.git
 cd aic8800d80-linux-fix
-
-# 2. Run the interactive installer (as root)
 sudo bash install.sh
+```
+
+### The installer will ask you for
+- WAN/uplink interface, usually `eth0`
+- LAN/AP WiFi interface, usually `wlan0`
+- AP gateway IP and CIDR
+- DHCP range
+- SSID and WiFi password
+- Country code and channel
+- Whether to use Unbound/system DNS on port 53
+- Whether to add an SSH protection rule on the wired interface
+
+### What it automates
+- installs prerequisites such as `dkms`, kernel headers, `usb-modeswitch`, `hostapd`, and `dnsmasq`
+- downloads and installs the `aic8800-firmware` and `aic8800-usb-dkms` packages
+- removes stale AIC firmware from previous attempts
+- patches and installs all repo config files
+- adds `usb-storage.quirks=1111:1111:i` to `/boot/firmware/cmdline.txt` if missing
+- enables IPv4 forwarding
+- applies and saves NAT rules for internet sharing
+- enables `aic8800-switch`, `hostapd`, and `dnsmasq`
+
+### Reboot and verify
+
+```bash
+sudo reboot
+```
+
+After reboot:
+
+```bash
+lsusb | grep a69c
+ip addr show wlan0
+sudo systemctl status aic8800-switch hostapd dnsmasq --no-pager
+dkms status
+```
 ```
 
 The installer will **detect your network interfaces** and walk you through:
