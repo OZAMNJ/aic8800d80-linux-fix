@@ -1,0 +1,4 @@
+ACTION=="add", SUBSYSTEM=="usb", \
+  ATTR{idVendor}=="1111", ATTR{idProduct}=="1111", \
+  TAG+="systemd", \
+  ENV{SYSTEMD_WANTS}="aic8800-switch.service"

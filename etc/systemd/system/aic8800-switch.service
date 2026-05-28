@@ -1,0 +1,27 @@
+[Unit]
+Description=AIC8800D80 USB Modeswitch
+After=systemd-udevd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Send single-message modeswitch — device disconnects and re-enumerates
+ExecStart=/usr/sbin/usb_modeswitch \
+  -v 0x1111 -p 0x1111 \
+  -M "555342438765432100000000000010fd0000000000000000000000000000f2"
+# Wait for firmware stage 1->2->3 re-enumeration
+ExecStartPost=/bin/sleep 10
+# Load firmware downloader (triggers a69c:8d80 -> a69c:8d81 transition)
+ExecStartPost=/sbin/modprobe aic_load_fw_usb
+ExecStartPost=/bin/sleep 5
+# Load main WiFi driver (creates wlan0)
+ExecStartPost=/sbin/modprobe aic8800_fdrv_usb
+ExecStartPost=/bin/sleep 3
+# Assign static IP and bring interface up
+# CHANGE 192.168.73.1/24 to your chosen AP gateway/subnet
+ExecStartPost=-/sbin/ip addr add 192.168.73.1/24 dev wlan0
+ExecStartPost=-/sbin/ip link set wlan0 up
+ExecStartPost=-/sbin/iw dev wlan0 set power_save off
+
+[Install]
+WantedBy=multi-user.target
