@@ -1,0 +1,15 @@
+# Debian packages downloaded during install
+*.deb
+
+# Backup directories created by installer
+/var/backups/aic8800d80-install-*/
+
+# macOS
+.DS_Store
+
+# Editor artifacts
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
