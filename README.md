@@ -629,6 +629,50 @@ sudo dpkg-reconfigure aic8800-usb-dkms
 | `/etc/dnsmasq.d/travel-ap.conf` | DHCP server for AP clients |
 | `/etc/NetworkManager/conf.d/99-aic-ap.conf` | Stops NetworkManager touching wlan0 |
 
+## Uninstall
+
+> **Automated:** The repo includes `uninstall.sh` which reverses every step `install.sh` performed.
+
+```bash
+sudo bash uninstall.sh
+```
+
+> After running, reboot to complete the cleanup. The dongle will return to CD-ROM mode (1111:1111) until `install.sh` is run again.
+
+### Manual Uninstall
+
+If you prefer to uninstall manually:
+
+**1. Remove DKMS driver and firmware**
+```bash
+sudo apt purge aic8800-firmware aic8800-usb-dkms
+sudo rm -rf /lib/firmware/aic8800D80
+```
+
+**2. Remove config files and services**
+```bash
+sudo rm -f /etc/udev/rules.d/99-aic8800-switch.rules
+sudo rm -f /etc/systemd/system/aic8800-switch.service
+sudo rm -rf /etc/systemd/system/hostapd.service.d/
+sudo rm -rf /etc/systemd/system/dnsmasq.service.d/
+sudo rm -f /etc/modprobe.d/aic8800-blacklist.conf
+sudo rm -f /etc/NetworkManager/conf.d/99-aic-ap.conf
+sudo rm -f /etc/hostapd/hostapd.conf
+sudo rm -f /etc/dnsmasq.d/travel-ap.conf
+sudo systemctl daemon-reload
+```
+
+**3. Revert system files**
+```bash
+# Remove usb-storage.quirks from /boot/firmware/cmdline.txt (edit manually)
+sudo update-initramfs -u
+sudo netfilter-persistent flush
+sudo netfilter-persistent save
+```
+
+---
+
+
 ## References
 
 - [radxa-pkg/aic8800](https://github.com/radxa-pkg/aic8800) — DKMS driver packages (use these, not shenmintao)
